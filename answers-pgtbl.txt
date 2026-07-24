@@ -1,0 +1,20 @@
+1. Speed up system calls
+哪些其他 xv6 系统调用可以通过这个共享页加速？请解释。
+
+答：uptime() 系统调用可以通过 USYSCALL 共享页加速。具体做法是：在 struct usyscall 中增加一个 ticks 字段，内核在每次时钟中断时更新该字段的值。这样用户程序就可以直接从共享页中读取 ticks 值，而不需要通过系统调用陷入内核。这完全消除了内核态切换的开销，因为读取操作只是简单的内存访问。
+
+2. Print a page table
+根据教材中的图 3-4 解释 vmprint 的输出。
+
+答：
+- page 0 包含什么？
+  page 0 包含 init 进程的代码段（text segment）。从 PTE 标志位 0x1B（PTE_V | PTE_R | PTE_X | PTE_U）可以看出，该页具有读、执行权限，用户可访问。
+
+- page 2 包含什么？
+  page 2 是栈保护页（stack guard page）。从 PTE 标志位 0x07（PTE_V | PTE_R | PTE_W）可以看出，该页只有内核可读写，PTE_U 标志位被清除了，因此用户态程序无法访问该页。当用户栈溢出到该页时会触发 page fault，从而检测栈溢出。
+
+- 在用户态运行时，进程能否读写 page 1 映射的内存？
+  不能。page 1 是数据段，从 PTE 标志位 0x17（PTE_V | PTE_R | PTE_W | PTE_U）可以看出，用户态可以读写该页。但 page 2（栈保护页）的 PTE_U 标志位已被清除，用户态进程无法访问。
+
+- 倒数第三个页包含什么？
+  倒数第三个页（entry 509）是 USYSCALL 页，这是一个内核与用户空间共享的只读页。该页存储了当前进程的 PID，用于加速 getpid() 系统调用。从 PTE 标志位 0x13（PTE_V | PTE_R | PTE_U）可以看出，用户态只读访问。
