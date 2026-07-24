@@ -1,0 +1,27 @@
+1. 查看 backtrace 输出，哪个函数调用了 syscall？
+   usertrap() 调用了 syscall()。当用户程序执行 ecall 指令时，硬件跳转到 trampoline.S 中的 uservec，
+   然后进入 usertrap()，最终由 usertrap() 调用 syscall() 来处理系统调用。
+
+2. p->trapframe->a7 的值是什么？这个值代表什么含义？
+   p->trapframe->a7 = 7，即 SYS_exec。a7 寄存器在 RISC-V 调用约定中用于存放系统调用号。
+   从 user/initcode.S 可以看到，xv6 启动的第一个用户程序 initcode 调用了 exec 系统调用，
+   因此 a7 的值为 SYS_exec（7）。
+
+3. CPU 之前处于什么模式？
+   CPU 之前处于用户模式（User mode）。通过 p /x $sstatus 查看 sstatus 寄存器，
+   其 SPP 位（bit 8）为 0，表示异常发生前 CPU 处于用户模式。
+   这是因为用户程序通过 ecall 指令主动陷入内核。
+
+4. 内核在 panic 时的汇编指令是什么？哪个寄存器对应变量 num？
+   将 num = p->trapframe->a7 替换为 num = *(int *)0 后，内核在尝试从地址 0
+   加载数据时发生 page fault。对应汇编指令为 lw（load word）指令，目标寄存器
+   对应变量 num。可以通过搜索 kernel/kernel.asm 中 sepc 值对应的地址来确认。
+
+5. 内核为什么会崩溃？地址 0 在内核地址空间中是否被映射？scause 的值是否确认了这一点？
+   内核崩溃是因为尝试访问地址 0，而地址 0 在内核地址空间中未被映射（xv6 内核地址空间
+   从 KERNBASE=0x80000000 开始）。scause=0xd 表示 Load page fault（加载页错误），
+   确认了这是一个由于访问未映射地址导致的页错误。
+
+6. 内核 panic 时正在运行哪个二进制程序？其进程 ID（pid）是多少？
+   正在运行的程序是 initcode（xv6 启动的第一个用户程序），其进程 ID（pid）为 1。
+   可以通过 GDB 中执行 p p->name 和 p p->pid 来确认。
