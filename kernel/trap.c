@@ -65,6 +65,12 @@ usertrap(void)
     intr_on();
 
     syscall();
+  } else if(r_scause() == 15){
+    // store page fault - could be copy-on-write
+    uint64 va = r_stval();
+    if(va >= p->sz || cowalloc(p->pagetable, va) != 0){
+      setkilled(p);
+    }
   } else if((which_dev = devintr()) != 0){
     // ok
   } else {

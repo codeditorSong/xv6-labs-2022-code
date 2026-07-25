@@ -298,17 +298,16 @@ uvmfree(pagetable_t pagetable, uint64 sz)
 
 // Given a parent process's page table, copy
 // its memory into a child's page table.
-// Copies both the page table and the
-// physical memory.
+// Uses copy-on-write: maps parent's physical pages
+// into child with read-only permissions, and marks
+// both parent and child PTEs as COW.
 // returns 0 on success, -1 on failure.
-// frees any allocated pages on failure.
 int
 uvmcopy(pagetable_t old, pagetable_t new, uint64 sz)
 {
   pte_t *pte;
   uint64 pa, i;
   uint flags;
-  char *mem;
 
   for(i = 0; i < sz; i += PGSIZE){
     if((pte = walk(old, i, 0)) == 0)
@@ -317,11 +316,19 @@ uvmcopy(pagetable_t old, pagetable_t new, uint64 sz)
       panic("uvmcopy: page not present");
     pa = PTE2PA(*pte);
     flags = PTE_FLAGS(*pte);
-    if((mem = kalloc()) == 0)
-      goto err;
-    memmove(mem, (char*)pa, PGSIZE);
-    if(mappages(new, i, PGSIZE, (uint64)mem, flags) != 0){
-      kfree(mem);
+    
+    // If the page is writable, make it COW in both parent and child
+    if(flags & PTE_W){
+      // Clear PTE_W and set PTE_COW in parent
+      *pte = (*pte & ~PTE_W) | PTE_COW;
+    }
+    
+    // Increment reference count for every shared page
+    incref((void*)pa);
+    
+    // Map the page into child (with COW flag if applicable)
+    flags = PTE_FLAGS(*pte);
+    if(mappages(new, i, PGSIZE, pa, flags) != 0){
       goto err;
     }
   }
@@ -330,6 +337,57 @@ uvmcopy(pagetable_t old, pagetable_t new, uint64 sz)
  err:
   uvmunmap(new, 0, i / PGSIZE, 1);
   return -1;
+}
+
+// Handle a copy-on-write page fault.
+// If the PTE at va is a COW mapping, allocate a new page,
+// copy the old page contents, and update the PTE to be writable.
+// If the PTE is already writable, return 0 (no action needed).
+// Returns 0 on success, -1 on error (out of memory, or write to non-COW read-only page).
+int
+cowalloc(pagetable_t pagetable, uint64 va)
+{
+  pte_t *pte;
+  uint64 pa;
+  uint flags;
+  char *mem;
+
+  if(va >= MAXVA)
+    return -1;
+
+  pte = walk(pagetable, va, 0);
+  if(pte == 0)
+    return -1;
+  if((*pte & PTE_V) == 0)
+    return -1;
+  if((*pte & PTE_U) == 0)
+    return -1;
+
+  // If already writable, nothing to do
+  if(*pte & PTE_W)
+    return 0;
+
+  // If not a COW page, it's a write to a read-only page - error
+  if(!(*pte & PTE_COW))
+    return -1;
+
+  pa = PTE2PA(*pte);
+  flags = PTE_FLAGS(*pte);
+  // Clear COW, set W
+  flags = (flags & ~PTE_COW) | PTE_W;
+
+  if((mem = kalloc()) == 0)
+    return -1;
+
+  memmove(mem, (char*)pa, PGSIZE);
+
+  // Update PTE to point to new page
+  *pte = PA2PTE((uint64)mem) | flags | PTE_V;
+
+  // Decrement reference count of old shared page
+  kfree((void*)pa);
+
+  return 0;
 }
 
 // mark a PTE invalid for user access.
@@ -355,6 +413,11 @@ copyout(pagetable_t pagetable, uint64 dstva, char *src, uint64 len)
 
   while(len > 0){
     va0 = PGROUNDDOWN(dstva);
+    
+    // Handle COW page if necessary
+    if(cowalloc(pagetable, va0) != 0)
+      return -1;
+    
     pa0 = walkaddr(pagetable, va0);
     if(pa0 == 0)
       return -1;
