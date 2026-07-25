@@ -16,6 +16,8 @@ int flags2perm(int flags)
       perm = PTE_X;
     if(flags & 0x2)
       perm |= PTE_W;
+    if(flags & 0x4)
+      perm |= PTE_R;
     return perm;
 }
 
