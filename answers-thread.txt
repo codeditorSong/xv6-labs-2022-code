@@ -1,0 +1,23 @@
+Why are there missing keys with 2 threads, but not with 1 thread?
+
+With 2 threads, the put() function has a race condition because multiple threads
+can access the same hash bucket concurrently without synchronization.
+
+Consider two threads T1 and T2 both trying to insert key K into bucket B,
+where key K does not currently exist in the hash table:
+
+1. T1 enters put(K, V1), computes i = K % NBUCKET
+2. T2 enters put(K, V2), computes i = K % NBUCKET (same bucket)
+3. T1 traverses table[i] and finds no entry with key K
+4. T2 traverses table[i] and finds no entry with key K (T1 hasn't inserted yet)
+5. T1 calls insert(K, V1, &table[i], table[i]), setting table[i] = e1
+6. T2 calls insert(K, V2, &table[i], table[i]), setting table[i] = e2
+   with e2->next = table[i] (the old value)
+   But T2 computed table[i] BEFORE T1's insertion, so e2->next points
+   to whatever table[i] was before T1's insertion (likely NULL or old chain).
+   Most importantly, e1 (T1's entry) is now lost because table[i] points
+   to e2, and e2->next does NOT point to e1.
+
+Result: T1's key K is not in the hash table. One key is missing.
+
+This cannot happen with 1 thread because all operations are serialized.
