@@ -103,6 +103,36 @@ e1000_transmit(struct mbuf *m)
   // a pointer so that it can be freed after sending.
   //
   
+  acquire(&e1000_lock);
+
+  // Get the current tail index
+  uint32 tail = regs[E1000_TDT];
+
+  // Check if the ring is full (descriptor at tail not done yet)
+  if (!(tx_ring[tail].status & E1000_TXD_STAT_DD)) {
+    release(&e1000_lock);
+    return -1;
+  }
+
+  // Free the old mbuf that was at this position (if any)
+  if (tx_mbufs[tail]) {
+    mbuffree(tx_mbufs[tail]);
+    tx_mbufs[tail] = 0;
+  }
+
+  // Fill in the transmit descriptor
+  tx_ring[tail].addr = (uint64) m->head;
+  tx_ring[tail].length = m->len;
+  tx_ring[tail].cmd = E1000_TXD_CMD_EOP | E1000_TXD_CMD_RS;
+  tx_ring[tail].status = 0; // clear status bits including DD
+
+  // Stash the mbuf for later freeing
+  tx_mbufs[tail] = m;
+
+  // Update the tail pointer
+  regs[E1000_TDT] = (tail + 1) % TX_RING_SIZE;
+
+  release(&e1000_lock);
   return 0;
 }
 
@@ -115,6 +145,41 @@ e1000_recv(void)
   // Check for packets that have arrived from the e1000
   // Create and deliver an mbuf for each packet (using net_rx()).
   //
+
+  acquire(&e1000_lock);
+
+  // Start from the next descriptor after the last one we processed
+  int i = (regs[E1000_RDT] + 1) % RX_RING_SIZE;
+
+  while (rx_ring[i].status & E1000_RXD_STAT_DD) {
+    // Get the received mbuf and update its length
+    struct mbuf *m = rx_mbufs[i];
+    m->len = rx_ring[i].length;
+
+    // Allocate a new mbuf to replace the one we're about to deliver
+    struct mbuf *new_mbuf = mbufalloc(0);
+    if (!new_mbuf)
+      panic("e1000_recv");
+
+    // Set up the descriptor with the new mbuf
+    rx_ring[i].addr = (uint64) new_mbuf->head;
+    rx_ring[i].status = 0; // clear status bits
+    rx_mbufs[i] = new_mbuf;
+
+    // Update RDT to tell the E1000 we've processed this descriptor
+    regs[E1000_RDT] = i;
+
+    // Move to the next descriptor
+    i = (i + 1) % RX_RING_SIZE;
+
+    // Release lock before calling net_rx() to avoid deadlock
+    // (net_rx may trigger ARP reply which calls e1000_transmit)
+    release(&e1000_lock);
+    net_rx(m);
+    acquire(&e1000_lock);
+  }
+
+  release(&e1000_lock);
 }
 
 void
