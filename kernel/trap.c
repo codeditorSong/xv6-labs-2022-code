@@ -65,6 +65,14 @@ usertrap(void)
     intr_on();
 
     syscall();
+  } else if(r_scause() == 13 || r_scause() == 15){
+    // page fault: load (13) or store (15)
+    uint64 va = r_stval();
+    if(va >= p->sz || va < PGROUNDDOWN(p->trapframe->sp)){
+      setkilled(p);
+    } else if(mmapfault(va) != 0){
+      setkilled(p);
+    }
   } else if((which_dev = devintr()) != 0){
     // ok
   } else {

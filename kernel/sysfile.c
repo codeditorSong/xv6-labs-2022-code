@@ -503,3 +503,191 @@ sys_pipe(void)
   }
   return 0;
 }
+
+// Find a VMA entry for a given virtual address
+// Returns pointer to VMA or 0 if not found
+struct vma*
+findvma(struct proc *p, uint64 va)
+{
+  for(int i = 0; i < NVMA; i++){
+    if(p->vmas[i].used && va >= p->vmas[i].addr && va < p->vmas[i].addr + p->vmas[i].length)
+      return &p->vmas[i];
+  }
+  return 0;
+}
+
+// Handle page fault for mmap'd regions (lazy allocation)
+// Returns 0 on success, -1 on failure (should kill process)
+int
+mmapfault(uint64 va)
+{
+  struct proc *p = myproc();
+  struct vma *vma;
+
+  // Find the VMA for this address
+  if((vma = findvma(p, va)) == 0)
+    return -1;
+
+  // Allocate a new physical page
+  char *mem = kalloc();
+  if(mem == 0)
+    return -1;
+  memset(mem, 0, PGSIZE);
+
+  // Read the file data into the page
+  uint64 offset = va - vma->addr;
+  ilock(vma->f->ip);
+  int n = readi(vma->f->ip, 0, (uint64)mem, offset, PGSIZE);
+  if(n < 0){
+    iunlock(vma->f->ip);
+    kfree(mem);
+    return -1;
+  }
+  iunlock(vma->f->ip);
+
+  // Set PTE permissions
+  int perm = PTE_U;
+  if(vma->prot & PROT_READ) perm |= PTE_R;
+  if(vma->prot & PROT_WRITE) perm |= PTE_W;
+  if(vma->prot & PROT_EXEC) perm |= PTE_X;
+
+  // Map the page into the user's page table
+  uint64 pageva = PGROUNDDOWN(va);
+  if(mappages(p->pagetable, pageva, PGSIZE, (uint64)mem, perm) != 0){
+    kfree(mem);
+    return -1;
+  }
+
+  return 0;
+}
+
+uint64
+sys_mmap(void)
+{
+  int length, prot, flags, fd;
+  uint64 addr;
+  struct file *f;
+  struct proc *p = myproc();
+  struct vma *vma;
+
+  argint(1, &length);
+  argint(2, &prot);
+  argint(3, &flags);
+  argint(4, &fd);
+  argint(5, (int*)&addr); // offset - we assume 0
+
+  // addr is expected to be 0 (kernel chooses)
+  // offset is expected to be 0
+
+  if(length <= 0)
+    return 0xffffffffffffffff;
+
+  // Get the file
+  if(fd < 0 || fd >= NOFILE || (f = p->ofile[fd]) == 0)
+    return 0xffffffffffffffff;
+
+  // Check permissions
+  if((prot & PROT_READ) && !f->readable)
+    return 0xffffffffffffffff;
+  if((prot & PROT_WRITE) && !f->writable && (flags == MAP_SHARED))
+    return 0xffffffffffffffff;
+
+  // Find a free VMA slot
+  int idx = -1;
+  for(int i = 0; i < NVMA; i++){
+    if(!p->vmas[i].used){
+      idx = i;
+      break;
+    }
+  }
+  if(idx < 0)
+    return 0xffffffffffffffff;
+
+  // Find a free virtual address region
+  addr = p->sz;
+  addr = PGROUNDUP(addr);
+
+  // Set up the VMA
+  vma = &p->vmas[idx];
+  vma->used = 1;
+  vma->addr = addr;
+  vma->length = length;
+  vma->prot = prot;
+  vma->flags = flags;
+  vma->f = f;
+  vma->offset = 0;
+
+  // Increment file reference count
+  filedup(f);
+
+  // Increase process size to cover the mapped region
+  p->sz = addr + length;
+
+  return addr;
+}
+
+uint64
+sys_munmap(void)
+{
+  uint64 addr;
+  int length;
+
+  argaddr(0, &addr);
+  argint(1, &length);
+
+  if(length <= 0)
+    return -1;
+
+  struct proc *p = myproc();
+  struct vma *vma;
+
+  // Find the VMA for this address
+  if((vma = findvma(p, addr)) == 0)
+    return -1;
+
+  // Write back MAP_SHARED pages and unmap
+  uint64 va = addr;
+  int npages = (length + PGSIZE - 1) / PGSIZE;
+
+  for(int i = 0; i < npages; i++){
+    uint64 pageva = va + i * PGSIZE;
+    pte_t *pte = walk(p->pagetable, pageva, 0);
+
+    if(pte && (*pte & PTE_V)){
+      // Write back MAP_SHARED dirty pages
+      if(vma->flags == MAP_SHARED && (*pte & PTE_W)){
+        uint64 pa = PTE2PA(*pte);
+        uint64 fileoff = pageva - vma->addr;
+        begin_op();
+        ilock(vma->f->ip);
+        if(writei(vma->f->ip, 0, pa, fileoff, PGSIZE) < 0){
+          iunlock(vma->f->ip);
+          end_op();
+          return -1;
+        }
+        iunlock(vma->f->ip);
+        end_op();
+      }
+      // Free the page
+      uint64 pa = PTE2PA(*pte);
+      kfree((void*)pa);
+      *pte = 0;
+    }
+  }
+
+  // Check if we're unmapping the entire VMA
+  if(addr == vma->addr && length == vma->length){
+    // Remove the entire VMA
+    fileclose(vma->f);
+    vma->used = 0;
+  } else if(addr == vma->addr){
+    // Unmapping from the start
+    vma->addr += length;
+    vma->length -= length;
+  } else if(addr + length == vma->addr + vma->length){
+    // Unmapping from the end
+    vma->length -= length;
+  }
+
+  return 0;
+}

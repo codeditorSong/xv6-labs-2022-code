@@ -5,6 +5,10 @@
 #include "spinlock.h"
 #include "proc.h"
 #include "defs.h"
+#include "fs.h"
+#include "sleeplock.h"
+#include "file.h"
+#include "fcntl.h"
 
 struct cpu cpus[NCPU];
 
@@ -308,6 +312,14 @@ fork(void)
       np->ofile[i] = filedup(p->ofile[i]);
   np->cwd = idup(p->cwd);
 
+  // Copy mmap'd regions
+  for(i = 0; i < NVMA; i++){
+    if(p->vmas[i].used){
+      np->vmas[i] = p->vmas[i];
+      filedup(p->vmas[i].f);
+    }
+  }
+
   safestrcpy(np->name, p->name, sizeof(p->name));
 
   pid = np->pid;
@@ -357,6 +369,35 @@ exit(int status)
       struct file *f = p->ofile[fd];
       fileclose(f);
       p->ofile[fd] = 0;
+    }
+  }
+
+  // Unmap all mmap'd regions
+  for(int i = 0; i < NVMA; i++){
+    if(p->vmas[i].used){
+      struct vma *vma = &p->vmas[i];
+      // Write back MAP_SHARED pages
+      uint64 va = vma->addr;
+      uint64 end = PGROUNDUP(vma->addr + vma->length);
+      for(va = vma->addr; va < end; va += PGSIZE){
+        pte_t *pte = walk(p->pagetable, va, 0);
+        if(pte && (*pte & PTE_V)){
+          if(vma->flags == MAP_SHARED && (*pte & PTE_W)){
+            uint64 pa = PTE2PA(*pte);
+            uint64 fileoff = va - vma->addr;
+            begin_op();
+            ilock(vma->f->ip);
+            writei(vma->f->ip, 0, pa, fileoff, PGSIZE);
+            iunlock(vma->f->ip);
+            end_op();
+          }
+          uint64 pa = PTE2PA(*pte);
+          kfree((void*)pa);
+          *pte = 0;
+        }
+      }
+      fileclose(vma->f);
+      vma->used = 0;
     }
   }
 
